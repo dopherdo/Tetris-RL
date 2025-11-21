@@ -1,4 +1,5 @@
 gymnasium
+tetris-gymnasium
 numpy
 matplotlib
 torch
