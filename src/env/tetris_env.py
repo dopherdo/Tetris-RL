@@ -12,12 +12,19 @@ import tetris_gymnasium.envs
 
 class TetrisEnv(gym.Wrapper):
     """
-    Custom Tetris Environment Wrapper with Reward Engineering
+    Custom Tetris Environment with Composite Actions and Reward Engineering
     
-    Wraps the tetris-gymnasium environment and adds:
+    Uses composite direct placement actions for easier PPO training:
+    - Action space: 40 actions (10 columns × 4 rotations)
+    - Each action directly places a piece at (column, rotation)
     - Custom reward shaping based on game state analysis
-    - Simplified observation space (board grid + current piece)
     - Enhanced metrics tracking for training analysis
+    
+    Action Encoding:
+        Actions 0-9:   Place in columns 0-9 with rotation 0 (0°)
+        Actions 10-19: Place in columns 0-9 with rotation 1 (90°)
+        Actions 20-29: Place in columns 0-9 with rotation 2 (180°)
+        Actions 30-39: Place in columns 0-9 with rotation 3 (270°)
     """
     
     def __init__(self, 
@@ -31,7 +38,7 @@ class TetrisEnv(gym.Wrapper):
                  reward_survival=0.1,              # Small bonus for surviving
                  reward_on_placement_only=True):   # Only give rewards when piece locks             # Small bonus for surviving
         """
-        Initialize the Tetris environment with custom parameters
+        Initialize the Tetris environment with composite actions and custom rewards
         
         Args:
             render_mode: Rendering mode ('human', 'rgb_array', or None)
@@ -45,6 +52,13 @@ class TetrisEnv(gym.Wrapper):
             reward_on_placement_only: If True, only give shaped rewards when piece locks.
                                       If False, give rewards every action (default: True)
             
+        Action Space:
+            Composite actions (40 total): column (0-9) × rotation (0-3)
+            - Actions 0-9:   Column 0-9, no rotation (0°)
+            - Actions 10-19: Column 0-9, 90° rotation
+            - Actions 20-29: Column 0-9, 180° rotation  
+            - Actions 30-39: Column 0-9, 270° rotation
+            
         Note: All metrics are delta-based (only changes are rewarded/penalized)
         Penalty ratios: Holes (1.0) : Height (0.2) : Bumpiness (0.1)
         """
@@ -54,6 +68,16 @@ class TetrisEnv(gym.Wrapper):
                       height=height,
                       width=width)
         super().__init__(env)
+        
+        # Override action space for composite actions
+        # 10 columns × 4 rotations = 40 actions
+        self.action_space = spaces.Discrete(40)
+        
+        # Atomic action mappings for the base environment
+        self.MOVE_LEFT = 0
+        self.MOVE_RIGHT = 1
+        self.ROTATE = 2
+        self.HARD_DROP = 5
         
         # Store reward parameters
         self.reward_line_clear = reward_line_clear
@@ -66,7 +90,6 @@ class TetrisEnv(gym.Wrapper):
         # Track game statistics
         self.total_lines_cleared = 0
         self.total_score = 0
-        self.episode_steps = 0
         self.pieces_placed = 0
         
         # Store previous state for reward calculation
@@ -78,6 +101,9 @@ class TetrisEnv(gym.Wrapper):
         # Store previous board to detect when piece locks
         self.prev_board_hash = None
         
+        # Store last observation for composite actions
+        self.last_obs = None
+        
     def reset(self, **kwargs):
         """Reset the environment and statistics"""
         obs, info = self.env.reset(**kwargs)
@@ -85,7 +111,6 @@ class TetrisEnv(gym.Wrapper):
         # Reset statistics
         self.total_lines_cleared = 0
         self.total_score = 0
-        self.episode_steps = 0
         self.pieces_placed = 0
         self.prev_lines = 0
         
@@ -97,14 +122,31 @@ class TetrisEnv(gym.Wrapper):
         settled_board = self._get_settled_board(obs)
         self.prev_board_hash = self._hash_board(settled_board)
         
+        # Store observation for composite actions
+        self.last_obs = obs
+        
         return obs, info
     
-    def step(self, action):
+    def decode_action(self, composite_action):
         """
-        Execute action and return observation with custom reward
+        Decode composite action into (column, rotation)
         
         Args:
-            action: Action to take in the environment
+            composite_action: Integer 0-39
+            
+        Returns:
+            tuple: (column 0-9, rotation 0-3)
+        """
+        column = composite_action % 10
+        rotation = composite_action // 10
+        return column, rotation
+    
+    def step(self, composite_action):
+        """
+        Execute composite action: directly place piece at (column, rotation)
+        
+        Args:
+            composite_action: Integer 0-39 representing (column, rotation)
             
         Returns:
             observation: Current game state
@@ -113,13 +155,77 @@ class TetrisEnv(gym.Wrapper):
             truncated: Whether episode was truncated
             info: Additional information
         """
-        # Execute the action
-        obs, base_reward, terminated, truncated, info = self.env.step(action)
+        # Decode composite action
+        target_column, num_rotations = self.decode_action(composite_action)
         
-        # Extract board state
-        board = obs['board']
+        # Get current piece position
+        if self.last_obs is None:
+            # Shouldn't happen, but handle gracefully
+            obs, reward, terminated, truncated, info = self.env.step(self.HARD_DROP)
+            self.last_obs = obs
+            return self._finalize_step(obs, reward, terminated, truncated, info, composite_action)
         
-        # Check if piece has been placed (settled board changed, not just active piece)
+        active_mask = self.last_obs['active_tetromino_mask']
+        active_positions = np.argwhere(active_mask > 0)
+        
+        if len(active_positions) == 0:
+            # No active piece, just drop
+            obs, reward, terminated, truncated, info = self.env.step(self.HARD_DROP)
+            self.last_obs = obs
+            return self._finalize_step(obs, reward, terminated, truncated, info, composite_action)
+        
+        # Calculate current column (in playable area 0-9)
+        # Full board columns 4-13 map to our columns 0-9
+        current_column_full = int(np.mean(active_positions[:, 1]))
+        current_column = current_column_full - 4
+        
+        # Step 1: Apply rotations
+        for _ in range(num_rotations):
+            obs, reward, terminated, truncated, info = self.env.step(self.ROTATE)
+            self.last_obs = obs
+            if terminated or truncated:
+                return self._finalize_step(obs, reward, terminated, truncated, info, composite_action)
+        
+        # Step 2: Move to target column
+        column_diff = target_column - current_column
+        
+        if column_diff < 0:
+            # Move left
+            for _ in range(abs(column_diff)):
+                obs, reward, terminated, truncated, info = self.env.step(self.MOVE_LEFT)
+                self.last_obs = obs
+                if terminated or truncated:
+                    return self._finalize_step(obs, reward, terminated, truncated, info, composite_action)
+        elif column_diff > 0:
+            # Move right
+            for _ in range(column_diff):
+                obs, reward, terminated, truncated, info = self.env.step(self.MOVE_RIGHT)
+                self.last_obs = obs
+                if terminated or truncated:
+                    return self._finalize_step(obs, reward, terminated, truncated, info, composite_action)
+        
+        # Step 3: Hard drop to place piece
+        obs, reward, terminated, truncated, info = self.env.step(self.HARD_DROP)
+        self.last_obs = obs
+        
+        return self._finalize_step(obs, reward, terminated, truncated, info, composite_action)
+    
+    def _finalize_step(self, obs, reward, terminated, truncated, info, composite_action):
+        """
+        Finalize step by calculating custom rewards and updating statistics
+        
+        Args:
+            obs: Observation from environment
+            reward: Base reward (ignored, we use custom)
+            terminated: Episode ended flag
+            truncated: Episode truncated flag
+            info: Info dict
+            composite_action: The composite action taken
+            
+        Returns:
+            obs, custom_reward, terminated, truncated, updated_info
+        """
+        # Check if piece has been placed (settled board changed)
         settled_board = self._get_settled_board(obs)
         current_board_hash = self._hash_board(settled_board)
         piece_placed = (current_board_hash != self.prev_board_hash)
@@ -128,34 +234,35 @@ class TetrisEnv(gym.Wrapper):
         if piece_placed:
             self.prev_board_hash = current_board_hash
         
-        # Calculate reward: either only on placement or every action
+        # Calculate custom reward
         if self.reward_on_placement_only:
             # Only give shaped rewards when piece locks in
             if piece_placed or terminated:
-                reward = self._calculate_custom_reward(obs, info, terminated)
+                custom_reward = self._calculate_custom_reward(obs, info, terminated)
             else:
                 # Small survival bonus while maneuvering piece
-                reward = 0.01
+                custom_reward = 0.01
         else:
-            # Give shaped rewards every action (original behavior)
-            reward = self._calculate_custom_reward(obs, info, terminated)
+            # Give shaped rewards every action
+            custom_reward = self._calculate_custom_reward(obs, info, terminated)
         
         # Update statistics
-        self.episode_steps += 1
-        self.total_score += reward
+        self.total_score += custom_reward
         if piece_placed:
             self.pieces_placed += 1
         
         # Add metrics to info
-        info['custom_reward'] = reward
-        info['episode_steps'] = self.episode_steps
+        info['custom_reward'] = custom_reward
         info['pieces_placed'] = self.pieces_placed
         info['holes'] = self._count_holes_settled(obs)
         info['bumpiness'] = self._calculate_bumpiness_settled(obs)
         info['max_height'] = self._get_max_height_settled(obs)
         info['piece_placed'] = piece_placed
+        info['composite_action'] = composite_action
+        info['target_column'] = composite_action % 10
+        info['rotation'] = composite_action // 10
         
-        return obs, reward, terminated, truncated, info
+        return obs, custom_reward, terminated, truncated, info
     
     def _calculate_custom_reward(self, obs, info, terminated):
         """

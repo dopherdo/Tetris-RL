@@ -30,20 +30,20 @@ def test_environment():
     print(f"   Available observation keys: {list(obs.keys())}")
     print("   ✓ Reset successful")
     
-    # Run a few random steps
-    print("\n4. Running 10 random steps...")
+    # Run a few random actions (composite placements)
+    print("\n4. Running 10 random actions...")
     total_reward = 0
-    for step in range(10):
+    for i in range(10):
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
         
-        print(f"   Step {step + 1}: Action={action}, Reward={reward:.3f}, "
+        print(f"   Action {i + 1}: Composite={action}, Reward={reward:.3f}, "
               f"Holes={info['holes']}, Height={info['max_height']}, "
               f"Terminated={terminated}")
         
         if terminated or truncated:
-            print(f"   Episode ended at step {step + 1}")
+            print(f"   Episode ended after {i + 1} pieces")
             break
     
     print(f"\n   Total reward: {total_reward:.3f}")
@@ -105,7 +105,6 @@ def test_full_episode():
             break
     
     print(f"\nEpisode Summary:")
-    print(f"  Total steps: {step_count}")
     print(f"  Pieces placed: {env.pieces_placed}")
     print(f"  Total reward: {episode_reward:.2f}")
     print(f"  Lines cleared: {env.total_lines_cleared}")
