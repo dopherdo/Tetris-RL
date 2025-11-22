@@ -12,18 +12,31 @@ import tetris_gymnasium.envs
 
 class TetrisEnv(gym.Wrapper):
     """
-    Custom Tetris Environment Wrapper with Reward Engineering
+    Custom Tetris Environment Wrapper with Reward Engineering and Macro-Actions
     
     Wraps the tetris-gymnasium environment and adds:
     - Custom reward shaping based on game state analysis
+    - Macro-actions for better PPO learning (one action = one piece placement)
     - Simplified observation space (board grid + current piece)
     - Enhanced metrics tracking for training analysis
     """
+    
+    # Tetris atomic action mappings (for tetris-gymnasium)
+    ACTION_LEFT = 0
+    ACTION_RIGHT = 1
+    ACTION_ROTATE_CW = 2
+    ACTION_ROTATE_CCW = 3
+    ACTION_SOFT_DROP = 4
+    ACTION_HARD_DROP = 5
+    ACTION_HOLD = 6
+    ACTION_NOP = 7
     
     def __init__(self, 
                  render_mode=None,
                  height=20, 
                  width=10,
+                 use_macro_actions=True,      # Use macro-actions for better RL learning
+                 n_rotations=4,               # Number of rotations per piece
                  reward_line_clear=10.0,      # Increased: Line clears are VERY good
                  reward_hole_penalty=-1.0,     # Increased: Holes are bad
                  reward_bumpiness_penalty=-0.05, # Decreased: Small changes OK
@@ -36,6 +49,9 @@ class TetrisEnv(gym.Wrapper):
             render_mode: Rendering mode ('human', 'rgb_array', or None)
             height: Board height (default: 20)
             width: Board width (default: 10)
+            use_macro_actions: If True, use macro-actions (column+rotation). 
+                              If False, use atomic actions (left/right/rotate/drop)
+            n_rotations: Number of possible rotations (default: 4)
             reward_line_clear: Reward per line cleared
             reward_hole_penalty: Penalty per hole created
             reward_bumpiness_penalty: Penalty for uneven column heights
@@ -51,6 +67,16 @@ class TetrisEnv(gym.Wrapper):
                       width=width,
                       gravity=True)
         super().__init__(env)
+        
+        # Macro-action settings
+        self.use_macro_actions = use_macro_actions
+        self.n_columns = width
+        self.n_rotations = n_rotations
+        
+        # Override action space if using macro-actions
+        if self.use_macro_actions:
+            # Each action is (column, rotation) pair
+            self.action_space = spaces.Discrete(self.n_columns * self.n_rotations)
         
         # Store reward parameters
         self.reward_line_clear = reward_line_clear
@@ -70,6 +96,10 @@ class TetrisEnv(gym.Wrapper):
         self.prev_height = 0
         self.prev_bumpiness = 0
         
+        # Track macro-action statistics
+        self.total_atomic_actions = 0
+        self.failed_placements = 0
+        
     def reset(self, **kwargs):
         """Reset the environment and statistics"""
         obs, info = self.env.reset(**kwargs)
@@ -82,6 +112,8 @@ class TetrisEnv(gym.Wrapper):
         self.prev_lines = 0
         self.prev_height = 0
         self.prev_bumpiness = 0
+        self.total_atomic_actions = 0
+        self.failed_placements = 0
         
         return obs, info
     
@@ -89,11 +121,16 @@ class TetrisEnv(gym.Wrapper):
         """
         Execute action and return observation with custom reward
         
-        With gravity=True, every action places a piece, so we always
-        calculate placement rewards.
+        If use_macro_actions=True:
+            Action is decoded into (column, rotation) and piece is placed there.
+            This provides better credit assignment for RL learning.
+        
+        If use_macro_actions=False:
+            Action is passed directly as atomic action to base environment.
         
         Args:
-            action: Action to take in the environment
+            action: Macro-action (int in [0, n_columns*n_rotations)) if use_macro_actions=True
+                   Atomic action (int in [0, 7]) if use_macro_actions=False
             
         Returns:
             observation: Current game state
@@ -102,11 +139,13 @@ class TetrisEnv(gym.Wrapper):
             truncated: Whether episode was truncated
             info: Additional information
         """
-        # Execute the action (with gravity=True, this places the piece)
-        obs, base_reward, terminated, truncated, info = self.env.step(action)
-        
-        # Calculate custom reward for this placement
-        reward = self._calculate_custom_reward(obs, info, terminated)
+        if self.use_macro_actions:
+            # Decode and execute macro-action
+            obs, reward, terminated, truncated, info = self._execute_macro_action(action)
+        else:
+            # Execute atomic action directly
+            obs, base_reward, terminated, truncated, info = self.env.step(action)
+            reward = self._calculate_custom_reward(obs, info, terminated)
         
         # Update statistics
         self.episode_steps += 1
@@ -119,7 +158,134 @@ class TetrisEnv(gym.Wrapper):
         info['bumpiness'] = self._calculate_bumpiness(obs['board'])
         info['max_height'] = self._get_max_height(obs['board'])
         
+        if self.use_macro_actions:
+            info['total_atomic_actions'] = self.total_atomic_actions
+            info['failed_placements'] = self.failed_placements
+        
         return obs, reward, terminated, truncated, info
+    
+    def _execute_macro_action(self, macro_action):
+        """
+        Execute a macro-action (complete piece placement)
+        
+        Decodes macro-action into target column and rotation, then executes
+        the sequence of atomic actions needed to achieve that placement.
+        
+        Args:
+            macro_action: Integer encoding (column, rotation) pair
+            
+        Returns:
+            observation, cumulative_reward, terminated, truncated, info
+        """
+        # Decode macro-action
+        target_column = macro_action % self.n_columns
+        target_rotation = macro_action // self.n_columns
+        
+        total_reward = 0
+        terminated = False
+        truncated = False
+        obs = None
+        info = {}
+        atomic_count = 0
+        
+        # Step 1: Rotate to target rotation
+        for _ in range(target_rotation):
+            obs, reward, terminated, truncated, info = self.env.step(self.ACTION_ROTATE_CW)
+            atomic_count += 1
+            
+            if terminated or truncated:
+                # Calculate final reward with custom shaping
+                final_reward = self._calculate_custom_reward(obs, info, terminated)
+                self.total_atomic_actions += atomic_count
+                info['macro_action'] = macro_action
+                info['target_column'] = target_column
+                info['target_rotation'] = target_rotation
+                return obs, final_reward, terminated, truncated, info
+        
+        # Step 2: Determine current piece position
+        current_column = self._estimate_piece_column(obs)
+        
+        # Step 3: Move to target column
+        if current_column is not None:
+            column_diff = target_column - current_column
+            
+            if column_diff < 0:
+                # Move left
+                for _ in range(abs(column_diff)):
+                    obs, reward, terminated, truncated, info = self.env.step(self.ACTION_LEFT)
+                    atomic_count += 1
+                    
+                    if terminated or truncated:
+                        final_reward = self._calculate_custom_reward(obs, info, terminated)
+                        self.total_atomic_actions += atomic_count
+                        info['macro_action'] = macro_action
+                        info['target_column'] = target_column
+                        info['target_rotation'] = target_rotation
+                        return obs, final_reward, terminated, truncated, info
+            
+            elif column_diff > 0:
+                # Move right
+                for _ in range(column_diff):
+                    obs, reward, terminated, truncated, info = self.env.step(self.ACTION_RIGHT)
+                    atomic_count += 1
+                    
+                    if terminated or truncated:
+                        final_reward = self._calculate_custom_reward(obs, info, terminated)
+                        self.total_atomic_actions += atomic_count
+                        info['macro_action'] = macro_action
+                        info['target_column'] = target_column
+                        info['target_rotation'] = target_rotation
+                        return obs, final_reward, terminated, truncated, info
+        
+        # Step 4: Hard drop to place piece
+        obs, reward, terminated, truncated, info = self.env.step(self.ACTION_HARD_DROP)
+        atomic_count += 1
+        
+        # Calculate custom reward only once at the end (for the complete placement)
+        final_reward = self._calculate_custom_reward(obs, info, terminated)
+        
+        self.total_atomic_actions += atomic_count
+        info['macro_action'] = macro_action
+        info['target_column'] = target_column
+        info['target_rotation'] = target_rotation
+        info['atomic_actions_this_step'] = atomic_count
+        
+        return obs, final_reward, terminated, truncated, info
+    
+    def _estimate_piece_column(self, obs):
+        """
+        Estimate the current column of the active piece
+        
+        Uses the active_tetromino_mask to find piece position
+        
+        Args:
+            obs: Observation dictionary
+            
+        Returns:
+            Estimated column (0-9) or None if can't determine
+        """
+        if obs is None or 'active_tetromino_mask' not in obs:
+            # Default to middle column
+            return self.n_columns // 2
+        
+        mask = obs['active_tetromino_mask']
+        
+        if mask.sum() == 0:
+            # No active piece, return middle
+            return self.n_columns // 2
+        
+        # Find leftmost column of active piece in playable area
+        # Board structure: (24, 18) with playable area at columns 4-13
+        playable_start = 4
+        
+        for col_idx in range(mask.shape[1]):
+            if mask[:, col_idx].any():
+                # Convert from full board column to playable column (0-9)
+                if col_idx >= playable_start:
+                    return col_idx - playable_start
+        
+        # Fallback to middle
+        return self.n_columns // 2
     
     def _calculate_custom_reward(self, obs, info, terminated):
         """
@@ -304,5 +470,22 @@ class TetrisEnv(gym.Wrapper):
     
     def get_action_space(self):
         """Return the action space of the environment"""
-        return self.env.action_space
+        return self.action_space if self.use_macro_actions else self.env.action_space
+    
+    def get_action_meanings(self):
+        """
+        Get human-readable meanings for each action
+        
+        Returns:
+            List of action descriptions
+        """
+        if not self.use_macro_actions:
+            return ["Left", "Right", "Rotate CW", "Rotate CCW", "Soft Drop", "Hard Drop", "Hold", "No-op"]
+        
+        meanings = []
+        for action in range(self.action_space.n):
+            column = action % self.n_columns
+            rotation = action // self.n_columns
+            meanings.append(f"Place at column {column}, rotation {rotation}")
+        return meanings
 

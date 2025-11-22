@@ -46,10 +46,10 @@ Required packages:
 
 ### 2. Verify Environment Setup
 
-Run the test script to verify the environment is working correctly:
+Run the test script to verify Phase 1 is working correctly:
 
 ```bash
-python test_env.py
+python3 test_env.py
 ```
 
 This will:
@@ -58,7 +58,23 @@ This will:
 - Display reward engineering metrics
 - Verify all components are working
 
-### 3. Run the Jupyter Notebook
+### 3. Test CNN Integration (Phase 2)
+
+Run the integration test to verify the CNN architecture:
+
+```bash
+python3 test_cnn_integration.py
+```
+
+This comprehensive test validates:
+- State preprocessing (board → tensor conversion)
+- CNN policy forward pass (tensor → actions + values)
+- Batch processing capabilities
+- Gradient flow through the network
+- Action distribution analysis
+- Value prediction consistency
+
+### 4. Run the Jupyter Notebook
 
 ```bash
 jupyter notebook project.ipynb
@@ -80,6 +96,22 @@ The notebook demonstrates:
 6. **Loop:** Repeats from **Step 1** with the new board state until Game Over
 
 ## Features
+
+### Macro-Actions for Better RL Learning
+
+The environment uses **macro-actions** (direct piece placements) instead of atomic actions:
+- **Macro-action**: One action = place piece at specific (column, rotation)
+- **Action space**: Discrete(40) = 10 columns × 4 rotations
+- **Benefits**:
+  - ✅ **Immediate credit assignment**: One action → one outcome → one reward
+  - ✅ **Faster learning**: Shorter episodes, clearer cause-effect
+  - ✅ **Better for PPO**: Denser rewards, more stable training
+  - ✅ **Human-intuitive**: Matches strategic thinking
+
+Compare to atomic actions (left, right, rotate, drop):
+- Atomic requires multiple steps per placement
+- Harder credit assignment (which action caused the result?)
+- Longer episodes, sparser rewards
 
 ### Custom Reward Engineering
 
@@ -107,9 +139,11 @@ The environment tracks comprehensive game statistics:
 - Reward engineering implementation
 - Comprehensive testing and validation
 
-🔄 **Phase 2: Neural Network Architecture** (TODO)
-- CNN feature extractor
-- Policy and value network heads
+✅ **Phase 2: Neural Network Architecture** (COMPLETED)
+- CNN feature extractor with 3 convolutional layers
+- Policy and value network heads (Actor-Critic)
+- State preprocessing utilities
+- Full integration testing with environment
 
 🔄 **Phase 3: PPO Implementation** (TODO)
 - Rollout buffer and GAE
