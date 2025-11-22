@@ -106,6 +106,7 @@ def test_full_episode():
     
     print(f"\nEpisode Summary:")
     print(f"  Total steps: {step_count}")
+    print(f"  Pieces placed: {env.pieces_placed}")
     print(f"  Total reward: {episode_reward:.2f}")
     print(f"  Lines cleared: {env.total_lines_cleared}")
     print(f"  Final max height: {info['max_height']}")

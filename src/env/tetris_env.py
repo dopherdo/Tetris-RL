@@ -24,11 +24,12 @@ class TetrisEnv(gym.Wrapper):
                  render_mode=None,
                  height=20, 
                  width=10,
-                 reward_line_clear=1.0,
-                 reward_hole_penalty=-0.5,
-                 reward_bumpiness_penalty=-0.1,
-                 reward_height_penalty=-0.05,
-                 reward_survival=0.01):
+                 reward_line_clear=10.0,           # Strong positive for clearing lines
+                 reward_hole_penalty=-1.0,         # Strongest penalty (per hole created)
+                 reward_bumpiness_penalty=-0.1,    # Weak penalty (per bumpiness unit increase)
+                 reward_height_penalty=-0.2,       # Medium penalty (per height increase)
+                 reward_survival=0.1,              # Small bonus for surviving
+                 reward_on_placement_only=True):   # Only give rewards when piece locks             # Small bonus for surviving
         """
         Initialize the Tetris environment with custom parameters
         
@@ -36,11 +37,16 @@ class TetrisEnv(gym.Wrapper):
             render_mode: Rendering mode ('human', 'rgb_array', or None)
             height: Board height (default: 20)
             width: Board width (default: 10)
-            reward_line_clear: Reward per line cleared
-            reward_hole_penalty: Penalty per hole created
-            reward_bumpiness_penalty: Penalty for uneven column heights
-            reward_height_penalty: Penalty for high stacks
+            reward_line_clear: Reward multiplier for lines cleared (exponential: 10, 30, 70, 150)
+            reward_hole_penalty: Penalty per hole created (positive for filled holes!)
+            reward_bumpiness_penalty: Penalty per bumpiness unit (symmetric delta-based)
+            reward_height_penalty: Penalty per height unit increase (symmetric delta-based)
             reward_survival: Small reward for surviving each step
+            reward_on_placement_only: If True, only give shaped rewards when piece locks.
+                                      If False, give rewards every action (default: True)
+            
+        Note: All metrics are delta-based (only changes are rewarded/penalized)
+        Penalty ratios: Holes (1.0) : Height (0.2) : Bumpiness (0.1)
         """
         # Create the base environment
         env = gym.make('tetris_gymnasium/Tetris', 
@@ -55,16 +61,22 @@ class TetrisEnv(gym.Wrapper):
         self.reward_bumpiness_penalty = reward_bumpiness_penalty
         self.reward_height_penalty = reward_height_penalty
         self.reward_survival = reward_survival
+        self.reward_on_placement_only = reward_on_placement_only
         
         # Track game statistics
         self.total_lines_cleared = 0
         self.total_score = 0
         self.episode_steps = 0
+        self.pieces_placed = 0
         
         # Store previous state for reward calculation
         self.prev_holes = 0
         self.prev_lines = 0
         self.prev_height = 0
+        self.prev_bumpiness = 0
+        
+        # Store previous board to detect when piece locks
+        self.prev_board_hash = None
         
     def reset(self, **kwargs):
         """Reset the environment and statistics"""
@@ -74,9 +86,16 @@ class TetrisEnv(gym.Wrapper):
         self.total_lines_cleared = 0
         self.total_score = 0
         self.episode_steps = 0
-        self.prev_holes = 0
+        self.pieces_placed = 0
         self.prev_lines = 0
-        self.prev_height = 0
+        
+        # Initialize previous state from the actual initial board (settled pieces only)
+        # This ensures first move only accounts for the change it causes
+        self.prev_holes = self._count_holes_settled(obs)
+        self.prev_height = self._get_max_height_settled(obs)
+        self.prev_bumpiness = self._calculate_bumpiness_settled(obs)
+        settled_board = self._get_settled_board(obs)
+        self.prev_board_hash = self._hash_board(settled_board)
         
         return obs, info
     
@@ -100,59 +119,93 @@ class TetrisEnv(gym.Wrapper):
         # Extract board state
         board = obs['board']
         
-        # Calculate custom reward components
-        reward = self._calculate_custom_reward(board, info, terminated)
+        # Check if piece has been placed (settled board changed, not just active piece)
+        settled_board = self._get_settled_board(obs)
+        current_board_hash = self._hash_board(settled_board)
+        piece_placed = (current_board_hash != self.prev_board_hash)
+        
+        # Update hash after checking
+        if piece_placed:
+            self.prev_board_hash = current_board_hash
+        
+        # Calculate reward: either only on placement or every action
+        if self.reward_on_placement_only:
+            # Only give shaped rewards when piece locks in
+            if piece_placed or terminated:
+                reward = self._calculate_custom_reward(obs, info, terminated)
+            else:
+                # Small survival bonus while maneuvering piece
+                reward = 0.01
+        else:
+            # Give shaped rewards every action (original behavior)
+            reward = self._calculate_custom_reward(obs, info, terminated)
         
         # Update statistics
         self.episode_steps += 1
         self.total_score += reward
+        if piece_placed:
+            self.pieces_placed += 1
         
         # Add metrics to info
         info['custom_reward'] = reward
         info['episode_steps'] = self.episode_steps
-        info['holes'] = self._count_holes(board)
-        info['bumpiness'] = self._calculate_bumpiness(board)
-        info['max_height'] = self._get_max_height(board)
+        info['pieces_placed'] = self.pieces_placed
+        info['holes'] = self._count_holes_settled(obs)
+        info['bumpiness'] = self._calculate_bumpiness_settled(obs)
+        info['max_height'] = self._get_max_height_settled(obs)
+        info['piece_placed'] = piece_placed
         
         return obs, reward, terminated, truncated, info
     
-    def _calculate_custom_reward(self, board, info, terminated):
+    def _calculate_custom_reward(self, obs, info, terminated):
         """
-        Calculate custom reward based on game state analysis
+        Calculate custom reward based on game state changes (delta-based)
         
         Reward components:
-        - Lines cleared: Positive reward
-        - Holes created: Negative penalty
-        - Column height variance (bumpiness): Negative penalty
-        - Maximum height: Negative penalty
-        - Survival: Small positive reward
+        - Lines cleared: Strong positive reward (exponential)
+        - Holes delta: Negative if created, POSITIVE if filled! (symmetric)
+        - Bumpiness delta: Penalty if increased, reward if decreased (symmetric)
+        - Height delta: Penalty if increased, reward if decreased (symmetric)
+        - Survival: Small positive reward per step
         - Game over: Large negative penalty
+        
+        Penalty ratios: Holes (1.0) : Height (0.2) : Bumpiness (0.1)
+        This reflects that holes are ~10x worse than bumpiness
+        
+        Note: All metrics are calculated on SETTLED pieces only (excludes active piece)
         """
         reward = 0.0
         
-        # Reward for lines cleared
+        # Reward for lines cleared (exponential: 10, 30, 70, 150 for 1-4 lines)
         current_lines = info.get('lines_cleared', 0)
         lines_delta = current_lines - self.prev_lines
         if lines_delta > 0:
-            # Exponential bonus for clearing multiple lines at once
             reward += self.reward_line_clear * (2 ** lines_delta - 1)
             self.total_lines_cleared += lines_delta
         self.prev_lines = current_lines
         
-        # Penalty for creating holes
-        current_holes = self._count_holes(board)
+        # Symmetric holes reward: penalty for creating, BONUS for filling!
+        # Only count holes in settled pieces (exclude active piece)
+        current_holes = self._count_holes_settled(obs)
         holes_delta = current_holes - self.prev_holes
-        if holes_delta > 0:
+        if holes_delta != 0:
+            # Negative delta (filled holes) gives positive reward!
             reward += self.reward_hole_penalty * holes_delta
         self.prev_holes = current_holes
         
-        # Penalty for bumpiness (uneven columns)
-        bumpiness = self._calculate_bumpiness(board)
-        reward += self.reward_bumpiness_penalty * bumpiness
+        # Symmetric bumpiness reward: penalty if increased, bonus if decreased
+        bumpiness = self._calculate_bumpiness_settled(obs)
+        bumpiness_delta = bumpiness - self.prev_bumpiness
+        if bumpiness_delta != 0:
+            reward += self.reward_bumpiness_penalty * bumpiness_delta
+        self.prev_bumpiness = bumpiness
         
-        # Penalty for stack height
-        max_height = self._get_max_height(board)
-        reward += self.reward_height_penalty * max_height
+        # Symmetric height reward: penalty if increased, bonus if decreased
+        max_height = self._get_max_height_settled(obs)
+        height_delta = max_height - self.prev_height
+        if height_delta != 0:
+            reward += self.reward_height_penalty * height_delta
+        self.prev_height = max_height
         
         # Small survival bonus (encourages longer games)
         if not terminated:
@@ -163,9 +216,56 @@ class TetrisEnv(gym.Wrapper):
         
         return reward
     
+    def _get_settled_board(self, obs):
+        """
+        Get the board with only settled pieces (excludes active falling piece)
+        Also extracts only the playable area: 20 rows × 10 columns
+        - Excludes walls (columns 0-3 and 14-17)
+        - Excludes floor (rows 20-23)
+        
+        Args:
+            obs: Observation dict with 'board' and 'active_tetromino_mask'
+            
+        Returns:
+            Board array (20×10) with active piece removed, walls and floor excluded
+        """
+        board = obs['board'].copy()
+        active_mask = obs['active_tetromino_mask']
+        board[active_mask > 0] = 0  # Remove active piece
+        
+        # Extract only playable area: rows 0-19, columns 4-13 (20×10)
+        playable_board = board[0:20, 4:14]
+        return playable_board
+    
+    def _count_holes_settled(self, obs):
+        """
+        Count the number of holes in SETTLED pieces only (excludes active piece)
+        A hole is an empty cell with at least one settled filled cell above it
+        Works on playable area only (20×10, walls and floor already excluded)
+        
+        Args:
+            obs: Observation dict with 'board' and 'active_tetromino_mask'
+            
+        Returns:
+            Number of holes
+        """
+        board = self._get_settled_board(obs)  # Already 20×10 playable area
+        holes = 0
+        height, width = board.shape
+        
+        for col in range(width):
+            block_found = False
+            for row in range(height):
+                if board[row, col] > 0:
+                    block_found = True
+                elif block_found and board[row, col] == 0:
+                    holes += 1
+        
+        return holes
+    
     def _count_holes(self, board):
         """
-        Count the number of holes in the board
+        Count the number of holes in the board (legacy method, includes active piece)
         A hole is an empty cell with at least one filled cell above it
         
         Args:
@@ -187,9 +287,31 @@ class TetrisEnv(gym.Wrapper):
         
         return holes
     
+    def _calculate_bumpiness_settled(self, obs):
+        """
+        Calculate bumpiness of SETTLED pieces only (excludes active piece)
+        Bumpiness = sum of absolute height differences between adjacent columns
+        Works on playable area only (20×10, walls and floor already excluded)
+        
+        Args:
+            obs: Observation dict with 'board' and 'active_tetromino_mask'
+            
+        Returns:
+            Total bumpiness value
+        """
+        board = self._get_settled_board(obs)  # Already 20×10 playable area
+        heights = self._get_column_heights(board)
+        bumpiness = 0
+        
+        for i in range(len(heights) - 1):
+            bumpiness += abs(heights[i] - heights[i + 1])
+        
+        return bumpiness
+    
     def _calculate_bumpiness(self, board):
         """
         Calculate bumpiness (sum of absolute height differences between adjacent columns)
+        Legacy method that includes active piece
         
         Args:
             board: 2D numpy array representing the game board
@@ -228,9 +350,24 @@ class TetrisEnv(gym.Wrapper):
         
         return heights
     
+    def _get_max_height_settled(self, obs):
+        """
+        Get the maximum column height of SETTLED pieces only (excludes active piece)
+        Works on playable area only (20×10, walls and floor already excluded)
+        
+        Args:
+            obs: Observation dict with 'board' and 'active_tetromino_mask'
+            
+        Returns:
+            Maximum height in playable area (0-20)
+        """
+        board = self._get_settled_board(obs)  # Already 20×10 playable area
+        heights = self._get_column_heights(board)
+        return max(heights) if heights else 0
+    
     def _get_max_height(self, board):
         """
-        Get the maximum column height
+        Get the maximum column height (legacy method, includes active piece)
         
         Args:
             board: 2D numpy array representing the game board
@@ -240,6 +377,18 @@ class TetrisEnv(gym.Wrapper):
         """
         heights = self._get_column_heights(board)
         return max(heights) if heights else 0
+    
+    def _hash_board(self, board):
+        """
+        Create a hash of the board state to detect when pieces lock
+        
+        Args:
+            board: 2D numpy array representing the game board
+            
+        Returns:
+            Hash of the board state
+        """
+        return hash(board.tobytes())
     
     def get_observation_space(self):
         """Return the observation space of the environment"""
