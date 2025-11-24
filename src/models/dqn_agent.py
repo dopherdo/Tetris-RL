@@ -15,7 +15,7 @@ import numpy as np
 import random
 
 from src.models.dqn_network import TetrisDQN
-from src.utils.replay_buffer import ReplayBuffer
+from src.utils.prioritized_replay_buffer import PrioritizedReplayBuffer
 
 
 class DQNAgent:
@@ -42,12 +42,16 @@ class DQNAgent:
         learning_rate=1e-4,
         gamma=0.999,  # High discount for long-term rewards (handles delayed credit assignment)
         epsilon_start=1.0,
-        epsilon_end=0.01,
-        epsilon_decay=0.995,
-        batch_size=128,
+        epsilon_end=0.05,  # Increased from 0.01 to maintain exploration
+        epsilon_decay=0.99995,  # Slower decay
+        batch_size=256,  # Increased from 128
         buffer_capacity=100000,
-        target_update_freq=1000,
-        learning_starts=10000
+        target_update_freq=750,  # Updated to 750 steps (sweet spot)
+        learning_starts=1000,  # Start learning earlier
+        use_per=True,  # Use Prioritized Experience Replay
+        per_alpha=0.6,  # Priority exponent
+        per_beta=0.4,  # Importance sampling exponent
+        per_beta_increment=1e-6  # Beta annealing rate
     ):
         """
         Initialize DQN agent
@@ -88,12 +92,21 @@ class DQNAgent:
         self.learning_rate = learning_rate
         self.optimizer = optim.Adam(self.q_network.parameters(), lr=learning_rate)
         
-        # Replay buffer
-        self.replay_buffer = ReplayBuffer(buffer_capacity, state_shape, device)
+        # Replay buffer (Prioritized Experience Replay)
+        self.use_per = use_per
+        if use_per:
+            self.replay_buffer = PrioritizedReplayBuffer(
+                buffer_capacity, state_shape, device,
+                alpha=per_alpha, beta=per_beta, beta_increment=per_beta_increment
+            )
+        else:
+            from src.utils.replay_buffer import ReplayBuffer
+            self.replay_buffer = ReplayBuffer(buffer_capacity, state_shape, device)
         
         # Tracking
         self.total_steps = 0
         self.training_steps = 0
+        self.last_td_errors = None  # Store TD errors for PER priority updates
     
     def select_action(self, state, legal_actions_mask=None, eval_mode=False):
         """
@@ -134,7 +147,7 @@ class DQNAgent:
                 action = torch.argmax(q_values, dim=1).item()
             return action
     
-    def store_transition(self, state, action, reward, next_state, done):
+    def store_transition(self, state, action, reward, next_state, done, td_error=None):
         """
         Store transition in replay buffer
         
@@ -144,8 +157,12 @@ class DQNAgent:
             reward: Reward received
             next_state: Next state
             done: Episode done flag
+            td_error: TD error for PER priority (if None, uses max priority)
         """
-        self.replay_buffer.add(state, action, reward, next_state, done)
+        if self.use_per:
+            self.replay_buffer.add(state, action, reward, next_state, done, td_error)
+        else:
+            self.replay_buffer.add(state, action, reward, next_state, done)
         self.total_steps += 1
     
     def train_step(self):
@@ -180,8 +197,17 @@ class DQNAgent:
             
             target_q = batch['rewards'] + self.gamma * max_next_q * (1 - batch['dones'])
         
+        # Compute TD errors for PER priority updates
+        td_errors = target_q - current_q
+        
         # Compute loss (Huber loss is more stable than MSE)
-        loss = F.smooth_l1_loss(current_q, target_q)
+        # Apply importance sampling weights if using PER
+        if self.use_per and 'weights' in batch:
+            weights = batch['weights']
+            loss = F.smooth_l1_loss(current_q, target_q, reduction='none')
+            loss = (weights * loss).mean()
+        else:
+            loss = F.smooth_l1_loss(current_q, target_q)
         
         # Optimize
         self.optimizer.zero_grad()
@@ -190,6 +216,12 @@ class DQNAgent:
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 10.0)
         self.optimizer.step()
         
+        # Update priorities in PER buffer
+        if self.use_per and 'indices' in batch:
+            with torch.no_grad():
+                td_errors_abs = torch.abs(td_errors)
+            self.replay_buffer.update_priorities(batch['indices'], td_errors_abs)
+        
         # Update target network periodically
         self.training_steps += 1
         if self.training_steps % self.target_update_freq == 0:
@@ -197,6 +229,15 @@ class DQNAgent:
         
         # Decay epsilon
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+        
+        # Learning rate scheduling (based on blurb: decay LR over time for stability)
+        # Decay LR every 20K steps: 1e-4 → 5e-5 → 2.5e-5
+        # Don't decay below 1e-4 to prevent collapse
+        if self.training_steps % 20000 == 0 and self.training_steps > 0:
+            current_lr = self.learning_rate
+            new_lr = current_lr * 0.5  # Halve learning rate every 20K steps
+            new_lr = max(1e-4, new_lr)  # Don't go below 1e-4 (prevent collapse)
+            self.set_learning_rate(new_lr)
         
         return loss.item()
     

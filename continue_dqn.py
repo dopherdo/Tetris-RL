@@ -57,21 +57,25 @@ def continue_training(
     
     preprocessor = TetrisPreprocessor(use_active_piece=True, device=device)
     
-    # Create agent - will check step count after loading to determine hyperparams
+    # Create agent with PER and optimized hyperparameters
     # Based on blurb findings: gamma=0.999 for long-term rewards and delayed credit assignment
     agent = DQNAgent(
         state_shape=(2, 20, 10),
         num_actions=40,
         device=device,
-        learning_rate=1e-4,  # Default, will update if restarting
+        learning_rate=1.5e-4,  # Optimized learning rate
         gamma=0.999,  # HIGH DISCOUNT: Handles delayed rewards (good moves may pay off many steps later)
-        epsilon_start=1.0,
-        epsilon_end=0.01,
-        epsilon_decay=0.9995,
-        batch_size=128,
+        epsilon_start=0.15,  # Start with moderate exploration
+        epsilon_end=0.05,  # Maintain minimum exploration (prevent collapse)
+        epsilon_decay=0.99995,  # Slower decay
+        batch_size=256,  # Increased batch size
         buffer_capacity=100_000,
-        target_update_freq=1000,
-        learning_starts=5000
+        target_update_freq=750,  # Sweet spot: 750 steps
+        learning_starts=1000,  # Start learning earlier
+        use_per=True,  # Use Prioritized Experience Replay
+        per_alpha=0.6,  # Priority exponent
+        per_beta=0.4,  # Importance sampling exponent
+        per_beta_increment=1e-6  # Beta annealing rate
     )
     
     # Handle checkpoint loading
@@ -107,8 +111,9 @@ def continue_training(
         print(f"  Buffer size: {len(agent.replay_buffer):,}")
         print()
         
-        # If restarting from 30K+, use new hyperparameters optimized for action masking
-        if agent.total_steps >= 30000:
+        # If continuing from checkpoint, apply optimized hyperparameters
+        # These are already set in agent creation, but we'll ensure they're correct
+        if agent.total_steps >= 10000:
             print("=" * 70)
             print("APPLYING OPTIMIZED HYPERPARAMETERS + TECHNIQUES FROM BLURB")
             print("=" * 70)
@@ -131,17 +136,20 @@ def continue_training(
             print("    - Penalizes tall pillars (columns 3+ blocks taller than neighbors)")
             print("    - Prevents difficult-to-clear structures")
             print()
-            print("HYPERPARAMETER UPDATES (CONSERVATIVE - FIXING DEGRADATION):")
-            print("  Learning rate: 1e-4 → 1.5e-4 (1.5x, more stable than 3e-4)")
-            print("  Epsilon: Current → 0.15 (more exploration to prevent overfitting)")
-            print("  Batch size: 128 → 256 (moderate increase)")
-            print("  Target update: 1000 → 250 (much more frequent, stabilize Q-values)")
-            print("  Learning starts: 5000 → 1000 (start learning earlier)")
-            print("  Epsilon decay: 0.9995 → 0.99995 (slower decay, maintain exploration)")
-            print("  Gamma: 0.99 → 0.999 (long-term reward focus)")
+            print("HYPERPARAMETER UPDATES (OPTIMIZED FROM BLURB + PER):")
+            print("  ✓ Prioritized Experience Replay (PER): ENABLED")
+            print("    - Samples high TD-error experiences (biggest mistakes first)")
+            print("    - 20-30% better sample efficiency")
+            print("  Learning rate: 1.5e-4 (balanced for stability + learning speed)")
+            print("  Epsilon: 0.15 → 0.05 (maintain exploration, prevent collapse)")
+            print("  Batch size: 256 (better gradient estimates)")
+            print("  Target update: 750 steps (sweet spot for stability)")
+            print("  Learning starts: 1000 (start learning earlier)")
+            print("  Epsilon decay: 0.99995 (slower decay, maintain exploration longer)")
+            print("  Gamma: 0.999 (long-term reward focus from blurb)")
             print()
-            print("Reason: Performance degraded 23.0 → 21.7 pieces. Using more conservative")
-            print("        settings to prevent overfitting and stabilize training.")
+            print("Reason: Applying proven optimizations from successful Tetris RL implementation.")
+            print("        PER is the #1 missing piece - focuses learning on biggest mistakes.")
             print()
             print("REWARD UPDATES (OPTIMIZED CONFIG):")
             print("  Line clear reward: 120.0 (strong positive for clearing lines)")
@@ -180,13 +188,14 @@ def continue_training(
         print("  • Double DQN (reduces overestimation)")
         print("  • Pillar penalty (board management)")
         print()
-        # Apply balanced hyperparameters from the start
+        # Apply optimized hyperparameters from blurb findings
+        # Key improvements: Lower LR for stability, slower epsilon decay, LR scheduling
         import torch.optim as optim
-        agent.set_learning_rate(3e-4)
-        agent.set_epsilon(0.1)
-        agent.epsilon_decay = 0.9999
+        agent.set_learning_rate(1e-4)  # Reduced from 3e-4 for stability (loss was increasing)
+        agent.set_epsilon(0.2)  # Higher initial epsilon for more exploration
+        agent.epsilon_decay = 0.99995  # Slower decay (maintain exploration longer)
         agent.batch_size = 256
-        agent.target_update_freq = 500
+        agent.target_update_freq = 250  # More frequent target updates for stability
         agent.learning_starts = 1000
         agent.gamma = 0.999  # High discount for long-term rewards
     
@@ -263,20 +272,29 @@ def continue_training(
             pbar.set_postfix({
                 'ε': f"{agent.epsilon:.3f}",
                 'loss': f"{np.mean(losses[-100:]):.2f}",
+                'LR': f"{agent.learning_rate:.0e}",
                 'buf': f"{len(agent.replay_buffer)}"
             })
+        
+        # Learning rate scheduling: Halve LR every 10K steps (from blurb - alternating phases)
+        if (step + 1) % 10000 == 0 and agent.total_steps > start_steps:
+            new_lr = agent.learning_rate * 0.5
+            agent.set_learning_rate(new_lr)
+            print(f"\nLearning rate decayed to: {new_lr:.1e}")
+            log_file.write(f"Learning rate decayed to: {new_lr:.1e}\n")
+            log_file.flush()
         
         # Log progress every 1K steps (without evaluation for speed)
         if (step + 1) % 1000 == 0:
             avg_loss = np.mean(losses[-100:]) if losses else 0.0
             
-            # Log to file
-            log_msg = f"Step {agent.total_steps:,}: ε={agent.epsilon:.3f}, loss={avg_loss:.3f}, buffer={len(agent.replay_buffer):,}\n"
+            # Log to file (include learning rate for monitoring)
+            log_msg = f"Step {agent.total_steps:,}: ε={agent.epsilon:.3f}, loss={avg_loss:.3f}, LR={agent.learning_rate:.0e}, buffer={len(agent.replay_buffer):,}\n"
             log_file.write(log_msg)
             log_file.flush()
             
             # Print to console (line by line progress)
-            print(f"Step {agent.total_steps:,}: ε={agent.epsilon:.3f}, loss={avg_loss:.3f}, buffer={len(agent.replay_buffer):,}")
+            print(f"Step {agent.total_steps:,}: ε={agent.epsilon:.3f}, loss={avg_loss:.3f}, LR={agent.learning_rate:.0e}, buffer={len(agent.replay_buffer):,}")
         
         # Evaluation
         if (step + 1) % eval_freq == 0:
@@ -444,8 +462,8 @@ if __name__ == "__main__":
     # After this run, evaluate performance and tune hyperparameters if needed
     
     continue_training(
-        checkpoint_path=None,  # Start fresh (recommended) - or set path to continue from checkpoint
-        target_total_steps=100_000,    # Train to 100K steps total (good baseline before tuning)
+        checkpoint_path='checkpoints/dqn_continued_70000.pt',  # Continue from 70K checkpoint (peak performance: 24.4 pieces)
+        additional_steps=50_000,       # Train for 50K more steps (70K → 120K total)
         eval_freq=5_000,               # Evaluate every 5K steps (recommended)
         eval_episodes=50               # 50 episodes per evaluation (stable stats)
     )

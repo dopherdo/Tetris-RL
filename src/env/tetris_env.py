@@ -14,31 +14,17 @@ class TetrisEnv(gym.Wrapper):
     """
     Custom Tetris Environment with Composite Actions and Reward Engineering
     
-    Uses composite direct placement actions for easier RL training:
+    Uses composite direct placement actions for easier PPO training:
     - Action space: 40 actions (10 columns × 4 rotations)
     - Each action directly places a piece at (column, rotation)
     - Custom reward shaping based on game state analysis
     - Enhanced metrics tracking for training analysis
-    - **Action masking optimizations** to reduce effective action space
     
     Action Encoding:
         Actions 0-9:   Place in columns 0-9 with rotation 0 (0°)
         Actions 10-19: Place in columns 0-9 with rotation 1 (90°)
         Actions 20-29: Place in columns 0-9 with rotation 2 (180°)
         Actions 30-39: Place in columns 0-9 with rotation 3 (270°)
-    
-    Action Masking Optimizations (via get_legal_actions_mask):
-        1. **Rotation Masking**: Filter redundant rotations
-           - O piece: Only rotation 0 (all 4 identical) → 40 → 10 actions (75% reduction!)
-           - I piece: Only rotations 0,1 (2,3 redundant) → 40 → 20 actions (50% reduction)
-           - S/Z pieces: Only rotations 0,1 (2,3 redundant) → 40 → 20 actions (50% reduction)
-        
-        2. **Column Masking**: Filter invalid columns for wide pieces
-           - I-piece horizontal (rotation 0,2): Masks columns 7-9 (can't fit)
-           - O-piece: Masks columns 9 (can't fit)
-           - Further reduces action space for these pieces
-        
-        Average action space reduction: ~40-50% across all pieces!
     """
     
     def __init__(self, 
@@ -49,9 +35,8 @@ class TetrisEnv(gym.Wrapper):
                  reward_hole_penalty=-1.0,         # Strongest penalty (per hole created)
                  reward_bumpiness_penalty=-0.1,    # Weak penalty (per bumpiness unit increase)
                  reward_height_penalty=-0.2,       # Medium penalty (per height increase)
-                 reward_pillar_penalty=-0.15,      # Penalty for tall pillars (board management)
                  reward_survival=0.1,              # Small bonus for surviving
-                 reward_on_placement_only=True):   # Only give rewards when piece locks
+                 reward_on_placement_only=True):   # Only give rewards when piece locks             # Small bonus for surviving
         """
         Initialize the Tetris environment with composite actions and custom rewards
         
@@ -63,7 +48,6 @@ class TetrisEnv(gym.Wrapper):
             reward_hole_penalty: Penalty per hole created (positive for filled holes!)
             reward_bumpiness_penalty: Penalty per bumpiness unit (symmetric delta-based)
             reward_height_penalty: Penalty per height unit increase (symmetric delta-based)
-            reward_pillar_penalty: Penalty for tall pillars (prevents difficult-to-clear structures)
             reward_survival: Small reward for surviving each step
             reward_on_placement_only: If True, only give shaped rewards when piece locks.
                                       If False, give rewards every action (default: True)
@@ -100,7 +84,6 @@ class TetrisEnv(gym.Wrapper):
         self.reward_hole_penalty = reward_hole_penalty
         self.reward_bumpiness_penalty = reward_bumpiness_penalty
         self.reward_height_penalty = reward_height_penalty
-        self.reward_pillar_penalty = reward_pillar_penalty
         self.reward_survival = reward_survival
         self.reward_on_placement_only = reward_on_placement_only
         
@@ -114,7 +97,7 @@ class TetrisEnv(gym.Wrapper):
         self.prev_lines = 0
         self.prev_height = 0
         self.prev_bumpiness = 0
-        self.prev_pillars = 0
+        self.prev_pillars = 0  # For pillar penalty tracking
         
         # Store previous board to detect when piece locks
         self.prev_board_hash = None
@@ -137,15 +120,11 @@ class TetrisEnv(gym.Wrapper):
         self.prev_holes = self._count_holes_settled(obs)
         self.prev_height = self._get_max_height_settled(obs)
         self.prev_bumpiness = self._calculate_bumpiness_settled(obs)
-        self.prev_pillars = self._count_pillars_settled(obs)
         settled_board = self._get_settled_board(obs)
         self.prev_board_hash = self._hash_board(settled_board)
         
         # Store observation for composite actions
         self.last_obs = obs
-        
-        # Add legal actions mask to info
-        info['legal_actions_mask'] = self.get_legal_actions_mask(obs)
         
         return obs, info
     
@@ -162,138 +141,6 @@ class TetrisEnv(gym.Wrapper):
         column = composite_action % 10
         rotation = composite_action // 10
         return column, rotation
-    
-    def _detect_piece_type(self, obs):
-        """
-        Detect the type of the current active piece based on its shape
-        
-        Returns:
-            str: Piece type ('O', 'I', 'S', 'Z', 'T', 'L', 'J', or 'unknown')
-        """
-        active_mask = obs.get('active_tetromino_mask', None)
-        if active_mask is None or np.sum(active_mask) == 0:
-            return 'unknown'
-        
-        # Get bounding box of active piece
-        active_positions = np.argwhere(active_mask > 0)
-        if len(active_positions) == 0:
-            return 'unknown'
-        
-        row_min, row_max = active_positions[:, 0].min(), active_positions[:, 0].max()
-        col_min, col_max = active_positions[:, 1].min(), active_positions[:, 1].max()
-        
-        height = row_max - row_min + 1
-        width = col_max - col_min + 1
-        num_cells = len(active_positions)
-        
-        # O piece: exactly 4 cells in a 2x2 square
-        if num_cells == 4 and height == 2 and width == 2:
-            return 'O'
-        
-        # I piece: 4 cells in a line (either 1x4 or 4x1)
-        if num_cells == 4 and (height == 1 or width == 1):
-            return 'I'
-        
-        # S and Z pieces: 4 cells, typically 2x3 or 3x2 bounding box
-        # They have asymmetric shapes that distinguish them
-        if num_cells == 4 and (height == 2 or width == 2):
-            # Check for S/Z pattern by looking at the shape
-            # S piece: top-left and bottom-right are filled
-            # Z piece: top-right and bottom-left are filled
-            # For simplicity, we'll detect based on bounding box and cell count
-            # Both have 2 unique rotations, so we can treat them the same for masking
-            return 'S'  # We'll handle both S and Z the same way
-        
-        # T, L, J pieces: 4 cells, typically 2x3 or 3x2 bounding box
-        # These have 4 unique rotations, so no optimization needed
-        return 'other'
-    
-    def _is_o_piece(self, obs):
-        """Check if current piece is O piece (for backward compatibility)"""
-        return self._detect_piece_type(obs) == 'O'
-    
-    def _get_piece_width(self, obs, rotation):
-        """
-        Get the width of the piece at a given rotation
-        
-        Args:
-            obs: Observation dict with 'active_tetromino_mask'
-            rotation: Rotation (0-3)
-            
-        Returns:
-            int: Width of the piece at this rotation
-        """
-        piece_type = self._detect_piece_type(obs)
-        
-        # Widths for each piece type at each rotation
-        # Rotation 0: initial, 1: 90°, 2: 180°, 3: 270°
-        piece_widths = {
-            'O': [2, 2, 2, 2],      # Always 2x2
-            'I': [4, 1, 4, 1],      # 4x1 or 1x4
-            'S': [3, 2, 3, 2],      # 3x2 or 2x3
-            'Z': [3, 2, 3, 2],      # 3x2 or 2x3
-            'T': [3, 2, 3, 2],      # 3x2 or 2x3
-            'L': [3, 2, 3, 2],      # 3x2 or 2x3
-            'J': [3, 2, 3, 2],      # 3x2 or 2x3
-            'other': [3, 2, 3, 2],  # Default assumption
-            'unknown': [3, 2, 3, 2]
-        }
-        
-        return piece_widths.get(piece_type, [3, 2, 3, 2])[rotation]
-    
-    def get_legal_actions_mask(self, obs):
-        """
-        Get a mask of legal actions with multiple optimizations:
-        
-        1. Rotation masking: Filter redundant rotations
-           - O piece: Only rotation 0 (all 4 rotations identical)
-           - I piece: Only rotations 0 and 1 (rotations 2,3 are redundant)
-           - S/Z pieces: Only rotations 0 and 1 (rotations 2,3 are redundant)
-        
-        2. Column masking: Filter columns where piece can't fit
-           - For wide pieces (I-piece horizontal, O-piece), mask out columns
-             where the piece would go out of bounds
-        
-        This can reduce the effective action space significantly:
-        - O piece: 40 → 10 actions (75% reduction!)
-        - I piece: 40 → 20 actions (50% reduction)
-        - S/Z pieces: 40 → 20 actions (50% reduction)
-        
-        Args:
-            obs: Observation dict with 'active_tetromino_mask'
-            
-        Returns:
-            np.ndarray: Boolean mask of shape (40,) where True = legal action
-        """
-        legal_mask = np.ones(40, dtype=bool)
-        piece_type = self._detect_piece_type(obs)
-        
-        # Optimization 1: Rotation masking for pieces with redundant rotations
-        if piece_type == 'O':
-            # O piece: Only rotation 0 needed (all rotations identical)
-            legal_mask[10:40] = False  # Mask rotations 1, 2, 3
-        elif piece_type == 'I':
-            # I piece: Only rotations 0 and 1 needed (2 and 3 are redundant)
-            legal_mask[20:40] = False  # Mask rotations 2, 3
-        elif piece_type == 'S':
-            # S/Z pieces: Only rotations 0 and 1 needed (2 and 3 are redundant)
-            legal_mask[20:40] = False  # Mask rotations 2, 3
-        
-        # Optimization 2: Column masking for wide pieces
-        # Check each rotation and mask invalid columns
-        for rotation in range(4):
-            if not any(legal_mask[rotation * 10:(rotation + 1) * 10]):
-                continue  # This rotation is already masked
-            
-            piece_width = self._get_piece_width(obs, rotation)
-            max_valid_column = 10 - piece_width
-            
-            # Mask out columns where piece would go out of bounds
-            for col in range(max_valid_column + 1, 10):
-                action_idx = rotation * 10 + col
-                legal_mask[action_idx] = False
-        
-        return legal_mask
     
     def step(self, composite_action):
         """
@@ -416,47 +263,70 @@ class TetrisEnv(gym.Wrapper):
         info['target_column'] = composite_action % 10
         info['rotation'] = composite_action // 10
         
-        # Add legal actions mask (filters redundant rotations for O piece)
-        info['legal_actions_mask'] = self.get_legal_actions_mask(obs)
-        
         return obs, custom_reward, terminated, truncated, info
     
     def _calculate_custom_reward(self, obs, info, terminated):
         """
         Calculate custom reward based on game state changes (delta-based)
         
+        Enhanced with improvements from successful implementation:
+        - Dynamic hole penalty based on board height
+        - Pillar penalty only when board is half-full or has holes
+        - High placement penalty when board is low
+        - Strong bonus for 4-line clears (Tetris)
+        
         Reward components:
-        - Lines cleared: Strong positive reward (exponential)
-        - Holes delta: Negative if created, POSITIVE if filled! (symmetric)
+        - Lines cleared: Strong positive reward (exponential + Tetris bonus)
+        - Holes delta: Dynamic penalty based on board state
         - Bumpiness delta: Penalty if increased, reward if decreased (symmetric)
         - Height delta: Penalty if increased, reward if decreased (symmetric)
-        - Pillars delta: Penalty if increased, reward if decreased (symmetric)
-          (Pillars are columns 3+ blocks taller than neighbors - difficult to clear)
         - Survival: Small positive reward per step
         - Game over: Large negative penalty
-        
-        Penalty ratios: Holes (1.0) : Height (0.2) : Pillars (0.15) : Bumpiness (0.1)
-        This reflects that holes are ~10x worse than bumpiness, pillars are intermediate
         
         Note: All metrics are calculated on SETTLED pieces only (excludes active piece)
         """
         reward = 0.0
+        
+        # Get current board metrics
+        settled_board = self._get_settled_board(obs)
+        current_holes = self._count_holes_settled(obs)
+        bumpiness = self._calculate_bumpiness_settled(obs)
+        max_height = self._get_max_height_settled(obs)
+        total_heights = np.sum(self._get_column_heights(settled_board))
+        
+        # Get piece placement position (y_pos approximation from max height)
+        y_pos = max_height  # Approximate y position
         
         # Reward for lines cleared (exponential: 10, 30, 70, 150 for 1-4 lines)
         current_lines = info.get('lines_cleared', 0)
         lines_delta = current_lines - self.prev_lines
         if lines_delta > 0:
             reward += self.reward_line_clear * (2 ** lines_delta - 1)
+            # Strong bonus for 4-line clear (Tetris)
+            if lines_delta == 4:
+                reward += 5000.0  # Massive bonus for Tetris
             self.total_lines_cleared += lines_delta
         self.prev_lines = current_lines
         
+        # Dynamic hole penalty based on board height (from successful implementation)
+        # Higher boards get reduced penalty (agent is in danger, needs flexibility)
+        board_half_full = total_heights >= 110 or (total_heights >= 90 and bumpiness >= 10)
+        
+        if total_heights >= 140 or (total_heights >= 110 and bumpiness >= 12):
+            # Board is very high - reduced penalty
+            hole_penalty = -2.0
+        elif total_heights >= 90 or (total_heights >= 70 and bumpiness >= 9):
+            # Board is moderately high - medium penalty
+            hole_penalty = -3.0
+        else:
+            # Board is low - full penalty
+            hole_penalty = self.reward_hole_penalty
+        
         # Symmetric holes reward: penalty for creating, BONUS for filling!
-        # Only count holes in settled pieces (exclude active piece)
-        current_holes = self._count_holes_settled(obs)
         holes_delta = current_holes - self.prev_holes
         if holes_delta != 0:
-            # Negative delta (filled holes) gives positive reward!
-            reward += self.reward_hole_penalty * holes_delta
+            # Use dynamic penalty
+            reward += hole_penalty * holes_delta
         self.prev_holes = current_holes
         
         # Symmetric bumpiness reward: penalty if increased, bonus if decreased
@@ -473,14 +343,6 @@ class TetrisEnv(gym.Wrapper):
             reward += self.reward_height_penalty * height_delta
         self.prev_height = max_height
         
-        # Pillar penalty: Penalize tall pillars (columns significantly taller than neighbors)
-        # Pillars make it difficult to clear lines and can lead to game over
-        current_pillars = self._count_pillars_settled(obs)
-        pillars_delta = current_pillars - self.prev_pillars
-        if pillars_delta != 0:
-            reward += self.reward_pillar_penalty * pillars_delta
-        self.prev_pillars = current_pillars
-        
         # DENSE REWARD: Reward almost-complete rows (KEY FOR LEARNING!)
         # This gives the agent a clear signal BEFORE completing lines
         settled_board = self._get_settled_board(obs)
@@ -490,6 +352,35 @@ class TetrisEnv(gym.Wrapper):
                 # Reward rows with 8+ cells: +2, +4, +6 for 8, 9, 10 cells
                 # (10 cells gets cleared anyway, but this encourages progress)
                 reward += (filled_count - 7) * 2.0
+        
+        # Pillar penalty: Only apply when board is half-full or has holes
+        # (from successful implementation - prevents covering pillars too early)
+        if hasattr(self, 'reward_pillar_penalty'):
+            if current_holes > 0 or board_half_full:
+                # Count pillars and apply penalty
+                pillars = self._count_pillars_settled(obs)
+                pillar_delta = pillars - self.prev_pillars
+                if pillar_delta != 0:
+                    reward += self.reward_pillar_penalty * pillar_delta
+                self.prev_pillars = pillars
+        
+        # High placement penalty when board is low (from successful implementation)
+        # Discourages placing pieces high when board has space
+        if total_heights <= 40:  # Board is mostly empty
+            high_placement_penalty = (10 - y_pos) * 2  # Stronger penalty
+        elif total_heights <= 100:  # Board is partially filled
+            high_placement_penalty = (10 - y_pos)  # Moderate penalty
+        else:
+            high_placement_penalty = 0  # No penalty when board is high
+        
+        if y_pos >= 12:  # Piece placed in upper 40% of board
+            reward -= high_placement_penalty
+        
+        # Low piece placement reward (encourage low stacking when appropriate)
+        if y_pos >= 9:
+            reward += 0.5  # Small reward for stacking high when board is high
+        else:
+            reward -= (10 - y_pos) * 0.2  # Gradual penalty for high stacking when board is low
         
         # Small survival bonus (encourages longer games)
         if not terminated:
@@ -661,38 +552,6 @@ class TetrisEnv(gym.Wrapper):
         """
         heights = self._get_column_heights(board)
         return max(heights) if heights else 0
-    
-    def _count_pillars_settled(self, obs):
-        """
-        Count the number of pillars in SETTLED pieces only (excludes active piece)
-        A pillar is a column that is significantly taller (3+ blocks) than both neighbors.
-        Pillars make it difficult to clear lines and should be penalized.
-        
-        Works on playable area only (20×10, walls and floor already excluded)
-        
-        Args:
-            obs: Observation dict with 'board' and 'active_tetromino_mask'
-            
-        Returns:
-            Number of pillars detected
-        """
-        board = self._get_settled_board(obs)  # Already 20×10 playable area
-        heights = self._get_column_heights(board)
-        
-        if len(heights) < 3:
-            return 0  # Need at least 3 columns to have neighbors
-        
-        pillar_count = 0
-        for i in range(1, len(heights) - 1):  # Skip edge columns
-            current_height = heights[i]
-            left_height = heights[i - 1]
-            right_height = heights[i + 1]
-            
-            # A pillar is a column that is 3+ blocks taller than both neighbors
-            if current_height >= left_height + 3 and current_height >= right_height + 3:
-                pillar_count += 1
-        
-        return pillar_count
     
     def _hash_board(self, board):
         """
