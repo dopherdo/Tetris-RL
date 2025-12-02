@@ -1,7 +1,7 @@
 # Tetris-RL
-Proximal Policy Optimization (PPO) for Tetris
+Deep Q-Learning (DQN) for Tetris
 
-A reinforcement learning project that trains an AI agent to play Tetris using the PPO algorithm with custom reward engineering.
+A reinforcement learning project that trains an AI agent to play Tetris using the DQN algorithm with Double DQN, Prioritized Experience Replay, and custom reward engineering.
 
 ## Project Structure
 
@@ -10,15 +10,17 @@ Tetris-RL/
 ├── src/
 │   ├── env/
 │   │   ├── __init__.py
-│   │   └── tetris_env.py          # Custom Gymnasium environment wrapper with reward engineering
+│   │   └── tetris_env.py          # Custom Gymnasium environment wrapper with reward engineering ✅
 │   ├── models/
 │   │   ├── __init__.py
-│   │   ├── cnn_policy.py          # PyTorch CNN architecture (TODO: Phase 2)
-│   │   └── ppo_agent.py           # PPO algorithm implementation (TODO: Phase 3)
-│   └── utils/
-│       ├── __init__.py
-│       ├── visualization.py       # Plotting and rendering helpers (TODO: Phase 4)
-│       └── preprocessing.py       # State conversion utilities (TODO: Phase 2)
+│   │   ├── dqn_network.py         # PyTorch CNN Q-Network architecture
+│   │   └── dqn_agent.py           # DQN algorithm with PER and Double DQN
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   ├── visualization.py       # Plotting and rendering helpers
+│   │   └── preprocessing.py       # State conversion utilities
+│   ├── train.py                   # Main DQN training loop
+│   └── evaluate.py                # Model evaluation script
 ├── test_env.py                    # Environment testing and validation script
 ├── project.ipynb                  # Jupyter notebook demonstrating the project
 ├── requirements.txt               # Python dependencies
@@ -28,7 +30,14 @@ Tetris-RL/
 
 ## Setup Instructions
 
-### 1. Install Dependencies
+### 1. Create Virtual Environment (Recommended)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+```
+
+### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -44,51 +53,49 @@ Required packages:
 - `tqdm` - Progress bars
 - `ipykernel` - Jupyter notebook support
 
-### 2. Verify Environment Setup
+### 3. Verify Environment Setup
 
-Run the test script to verify the environment is working correctly:
+Run the environment test:
 
 ```bash
-python test_env.py
+source .venv/bin/activate
+python -m src.env.tetris_env
 ```
 
 This will:
 - Create the custom Tetris environment
-- Run random actions to test functionality
+- Run 20 random actions to test functionality
 - Display reward engineering metrics
-- Verify all components are working
+- Show the final board state
 
-### 3. Run the Jupyter Notebook
+## Algorithm Overview
 
-```bash
-jupyter notebook project.ipynb
-```
+### Deep Q-Network (DQN) with Enhancements
 
-The notebook demonstrates:
-- Environment initialization
-- Random agent gameplay
-- Reward metrics visualization
-- Board state visualization
+**Core Concept:** Learn a Q-function Q(s, a) that estimates the expected cumulative reward for taking action `a` in state `s`.
 
-## Workflow
+**Enhancements:**
+1. **Fixed Q-Targets:** Separate target network updated periodically to stabilize learning
+2. **Double DQN:** Decouples action selection and evaluation to reduce Q-value overestimation
+3. **Prioritized Experience Replay (PER):** Prioritizes important transitions for faster learning
 
-1. **Preprocessing:** Board is preprocessed into a usable tensor
-2. **CNN Analysis:** CNN processes the tensor into a feature vector
-3. **Decision:** PPO takes the feature vector and determines the best action
-4. **Action:** The selected action is sent to the environment
-5. **Update:** Environment processes the move and updates the board state
-6. **Loop:** Repeats from **Step 1** with the new board state until Game Over
+### Action Space
 
-## Features
+**Composite Actions:** Each action directly specifies piece placement:
+- **Rotation:** 0-3 (four possible rotations)
+- **Column:** 0-9 (ten possible landing columns)
+- **Total Actions:** ~40 discrete composite actions per piece
+
+This approach is more efficient than atomic actions (left, right, rotate, drop) because it reduces the action sequence length.
 
 ### Custom Reward Engineering
 
 The environment implements sophisticated reward shaping:
 - **Line Clear Bonus**: Exponential rewards for clearing multiple lines (2^n - 1)
-- **Hole Penalty**: -0.5 per hole created (empty cell with filled cell above)
-- **Bumpiness Penalty**: -0.1 × sum of height differences between adjacent columns
-- **Height Penalty**: -0.05 × maximum column height
-- **Survival Bonus**: +0.01 per step (encourages longer games)
+- **Hole Penalty**: -0.1 per hole created (empty cell with filled cells above and below)
+- **Bumpiness Penalty**: -0.01 × sum of height differences between adjacent columns
+- **Height Penalty**: -0.01 × maximum column height
+- **Survival Bonus**: +0.1 per step (encourages longer games)
 - **Game Over Penalty**: -5.0 (strong negative signal)
 
 ### Metrics Tracking
@@ -100,26 +107,41 @@ The environment tracks comprehensive game statistics:
 - Episode steps and total score
 - Custom reward breakdown
 
+## Training Workflow
+
+1. **State Observation:** Extract 20×10 board grid from Tetris-Gymnasium
+2. **Preprocessing:** Convert board to tensor, normalize values
+3. **CNN Processing:** Extract spatial features (holes, heights, patterns)
+4. **Q-Value Estimation:** Output Q(s, a) for all composite actions
+5. **Action Selection:** Epsilon-greedy (explore vs. exploit)
+6. **Environment Step:** Execute action, receive reward and next state
+7. **Store Transition:** Add (s, a, r, s', done) to prioritized replay buffer
+8. **Training Update:** Sample batch, compute TD-error, update Q-network
+9. **Target Network Sync:** Periodically copy weights to target network
+
 ## Current Status
 
-✅ **Phase 1: Environment Setup** (COMPLETED)
+✅ **Phase 1: Environment Setup** (COMPLETE)
 - Custom Tetris environment with tetris-gymnasium backend
 - Reward engineering implementation
 - Comprehensive testing and validation
+- Baseline: Random agent achieves ~-20 reward per 20 steps
 
-🔄 **Phase 2: Neural Network Architecture** (TODO)
-- CNN feature extractor
-- Policy and value network heads
+🔄 **Phase 2: Neural Network Architecture** (IN PROGRESS)
+- CNN Q-Network for feature extraction and Q-value estimation
 
-🔄 **Phase 3: PPO Implementation** (TODO)
-- Rollout buffer and GAE
-- PPO clip loss and training loop
+🔄 **Phase 3: DQN Implementation** (TODO)
+- Prioritized Experience Replay buffer
+- Double DQN logic
+- Training loop with epsilon-greedy exploration
 
 🔄 **Phase 4: Evaluation** (TODO)
 - Training metrics and visualization
-- Agent performance evaluation
+- Agent performance evaluation vs. baselines
 
 ## Usage Example
+
+### Environment Test
 
 ```python
 from src.env.tetris_env import TetrisEnv
@@ -141,8 +163,41 @@ for _ in range(100):
 env.close()
 ```
 
+### Training (Coming Soon)
+
+```bash
+python -m src.train --episodes 1000 --batch-size 64 --lr 1e-4
+```
+
+### Evaluation (Coming Soon)
+
+```bash
+python -m src.evaluate models/checkpoints/dqn_tetris_ep500.pt --episodes 5 --render
+```
+
+## Hyperparameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Learning Rate | 1e-4 | Adam optimizer learning rate |
+| Discount Factor (γ) | 0.99 | Future reward discount |
+| Replay Buffer Size | 100,000 | Maximum transitions stored |
+| Batch Size | 64 | Minibatch size for training |
+| Target Update Freq | 1,000 steps | Target network sync interval |
+| Epsilon Start | 1.0 | Initial exploration rate |
+| Epsilon End | 0.01 | Minimum exploration rate |
+| Epsilon Decay | 10,000 steps | Exploration decay period |
+
+## Team Members
+
+- **Caleb Chu** - Environment integration, reward engineering, preprocessing
+- **Christopher Yeh** - CNN Q-Network architecture, model optimization
+- **Edan Sasson** - DQN agent, replay buffer, training loop
+
 ## References
 
 - [Tetris Gymnasium Documentation](https://max-we.github.io/Tetris-Gymnasium/)
 - [Gymnasium Documentation](https://gymnasium.farama.org/)
-- [PPO Paper](https://arxiv.org/abs/1707.06347)
+- [DQN Paper (Mnih et al., 2015)](https://arxiv.org/abs/1312.5602)
+- [Double DQN Paper](https://arxiv.org/abs/1509.06461)
+- [Prioritized Experience Replay Paper](https://arxiv.org/abs/1511.05952)
