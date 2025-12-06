@@ -1,6 +1,4 @@
-"""
-Main DQN training loop for Tetris.
-"""
+"""Main DQN training loop for Tetris."""
 
 from __future__ import annotations
 
@@ -19,15 +17,7 @@ from .utils.visualization import plot_learning_curve
 
 
 def infer_board_shape(env: gym.Env) -> Tuple[int, int]:
-    """
-    Infer the board shape from environment observation space.
-    
-    Args:
-        env: Gymnasium environment
-    
-    Returns:
-        Tuple of (height, width) for the playable board area
-    """
+    """Infer the board shape from environment observation space."""
     obs, _ = env.reset()
     processed = preprocess_observation(obs)
     return processed.shape
@@ -41,18 +31,7 @@ def train_dqn(
     model_dir: str = "models/checkpoints",
     config: DQNConfig | None = None,
 ) -> None:
-    """
-    Train DQN agent on Tetris.
-    
-    Args:
-        total_steps: Total environment steps to train for
-        warmup_steps: Steps to collect before training starts
-        eval_frequency: Steps between evaluations
-        eval_episodes: Number of episodes to run for evaluation
-        model_dir: Directory to save model checkpoints
-        config: DQN configuration
-    """
-    # Create environment
+    """Train DQN agent on Tetris."""
     env = make_tetris_env(render_mode=None)
     n_actions = env.action_space.n
     board_shape = infer_board_shape(env)
@@ -60,7 +39,6 @@ def train_dqn(
     print(f"Board shape: {board_shape}")
     print(f"Action space: {n_actions}")
     
-    # Create agent
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
@@ -71,76 +49,62 @@ def train_dqn(
         config=config,
     )
     
-    # Setup directories
     save_root = Path(model_dir)
     save_root.mkdir(parents=True, exist_ok=True)
     plot_dir = Path("plots")
     plot_dir.mkdir(parents=True, exist_ok=True)
     
-    # Training metrics
     episode_rewards = []
     episode_lengths = []
     training_losses = []
     step_rewards = []
     
-    # Initialize environment
     obs, _ = env.reset()
     obs_proc = preprocess_observation(obs)
     episode_reward = 0.0
     episode_length = 0
     
-    # Training loop
     pbar = tqdm(total=total_steps, desc="Training")
     
     for step in range(total_steps):
-        # Select action
         action = agent.select_action(obs_proc, eval_mode=False)
         
-        # Execute action
         next_obs, reward, terminated, truncated, info = env.step(action)
         next_obs_proc = preprocess_observation(next_obs)
         done = terminated or truncated
         
-        # Store transition
         agent.store_transition(obs_proc, action, reward, next_obs_proc, done)
         
-        # Update metrics
         episode_reward += reward
         episode_length += 1
         step_rewards.append(reward)
         
         obs_proc = next_obs_proc
         
-        # Train agent (after warmup)
         if step >= warmup_steps:
             metrics = agent.train_step()
             if metrics:
                 training_losses.append(metrics['loss'])
                 
-                # Update progress bar
                 pbar.set_postfix({
                     'eps': f"{agent.epsilon:.3f}",
                     'loss': f"{metrics['loss']:.4f}",
                     'Q_mean': f"{metrics['q_mean']:.2f}",
                 })
         
-        # Handle episode end
         if done:
             episode_rewards.append(episode_reward)
             episode_lengths.append(episode_length)
             
-            # Reset environment
             obs, _ = env.reset()
             obs_proc = preprocess_observation(obs)
             episode_reward = 0.0
             episode_length = 0
         
-        # Evaluation
         if (step + 1) % eval_frequency == 0:
             eval_reward, eval_lines = evaluate_agent(env, agent, eval_episodes)
             print(f"\nStep {step + 1}: Eval Reward = {eval_reward:.2f}, Lines = {eval_lines:.1f}")
             
-            # Save checkpoint
             ckpt_path = save_root / f"dqn_tetris_step{step+1}.pt"
             agent.save(str(ckpt_path))
             print(f"Saved checkpoint: {ckpt_path}")
@@ -149,12 +113,10 @@ def train_dqn(
     
     pbar.close()
     
-    # Save final model
     final_path = save_root / "dqn_tetris_final.pt"
     agent.save(str(final_path))
     print(f"\nTraining complete! Final model saved: {final_path}")
     
-    # Plot learning curves
     if episode_rewards:
         plot_learning_curve(episode_rewards, save_path=plot_dir / "reward_curve.png")
         print(f"Saved reward curve: {plot_dir / 'reward_curve.png'}")
@@ -167,17 +129,7 @@ def evaluate_agent(
     agent: DQNAgent,
     num_episodes: int = 5,
 ) -> Tuple[float, float]:
-    """
-    Evaluate agent performance.
-    
-    Args:
-        env: Gymnasium environment
-        agent: DQN agent to evaluate
-        num_episodes: Number of episodes to run
-    
-    Returns:
-        Tuple of (average_reward, average_lines_cleared)
-    """
+    """Evaluate agent performance."""
     total_rewards = []
     total_lines = []
     

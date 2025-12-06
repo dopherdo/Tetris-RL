@@ -1,28 +1,19 @@
-"""
-Standalone demo script that can be easily converted to notebook.
-Run this to see the trained model in action!
-"""
+"""Standalone demo script for trained model."""
+import torch
+import numpy as np
+from pathlib import Path
+
+from src.env import TetrisEnv, CompositeActionWrapper
+from src.models import DQNAgent, DQNConfig
+from src.utils import preprocess_observation
 
 print("="*70)
 print("DEEP Q-LEARNING FOR TETRIS - LIVE DEMO")
 print("="*70)
 
-# 1. Imports
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from pathlib import Path
-
-from src.env import TetrisEnv, CompositeActionWrapper
-from src.models import DQNAgent
-from src.utils import preprocess_observation
-
-print("✓ All imports successful!")
-print(f"✓ PyTorch version: {torch.__version__}")
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"✓ Using device: {device}")
+print(f"Using device: {device}")
 
-# 2. Load Model
 print("\n" + "="*70)
 print("LOADING TRAINED MODEL")
 print("="*70)
@@ -38,27 +29,23 @@ n_actions = env.action_space.n
 print(f"Board shape: {board_shape}")
 print(f"Number of composite actions: {n_actions}")
 
+config = DQNConfig()
 agent = DQNAgent(
     board_shape=board_shape,
     n_actions=n_actions,
     device=device,
-    lr=1e-4,
-    gamma=0.99,
-    buffer_size=50000
+    config=config
 )
 
-checkpoint_path = Path('models/overnight/checkpoint_500k.pt')
+checkpoint_path = Path('checkpoints/dqn_continued_final.pt')
 if checkpoint_path.exists():
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    agent.q_network.load_state_dict(checkpoint['q_network'])
-    agent.target_network.load_state_dict(checkpoint['target_network'])
-    print(f"✓ Loaded checkpoint from step {checkpoint['step']}")
+    agent.load(str(checkpoint_path))
+    print(f"Loaded checkpoint: {checkpoint_path}")
 else:
-    print("⚠ No checkpoint found! Using untrained model.")
+    print("No checkpoint found! Using untrained model.")
 
 agent.q_network.eval()
 
-# 3. Run Episodes
 print("\n" + "="*70)
 print("RUNNING EVALUATION EPISODES")
 print("="*70)
@@ -72,7 +59,7 @@ def run_episode(env, agent, use_agent=True):
     while not done and steps < 1000:
         if use_agent:
             board = preprocess_observation(obs)
-            action = agent.select_action(board, epsilon=0.0)
+            action = agent.select_action(board, eval_mode=True)
         else:
             action = env.action_space.sample()
         
@@ -96,7 +83,6 @@ trained_results = [run_episode(env, agent, use_agent=True) for _ in range(5)]
 print("Running 5 episodes with RANDOM agent...")
 random_results = [run_episode(env, agent, use_agent=False) for _ in range(5)]
 
-# 4. Display Results
 print("\n" + "="*70)
 print("PERFORMANCE COMPARISON (5 episodes average)")
 print("="*70)
@@ -121,7 +107,6 @@ for metric, label in zip(metrics, labels):
         print(f"{label:<20} {trained_val:>10.1f}    {random_val:>10.1f}    {'N/A':>10}")
 
 print("="*70)
-print("\n✓ Demo complete! Model performs {:.1f}% better than random.".format(
-    ((calc_avg(trained_results, 'pieces') - calc_avg(random_results, 'pieces')) / 
-     calc_avg(random_results, 'pieces')) * 100
-))
+improvement = ((calc_avg(trained_results, 'pieces') - calc_avg(random_results, 'pieces')) / 
+               calc_avg(random_results, 'pieces')) * 100
+print(f"\nDemo complete! Model performs {improvement:.1f}% better than random.")

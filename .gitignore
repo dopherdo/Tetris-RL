@@ -11,9 +11,9 @@ venv/
 ENV/
 env/
 
-# Model Checkpoints (too large for GitHub)
+# Model Checkpoints
+# Note: checkpoints/ directory is tracked for submission
 models/
-*.pt
 *.pth
 *.ckpt
 

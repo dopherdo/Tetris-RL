@@ -1,6 +1,4 @@
-"""
-Evaluation script: load a trained DQN agent and watch it play Tetris.
-"""
+"""Evaluation script: load a trained DQN agent and watch it play Tetris."""
 
 from __future__ import annotations
 
@@ -22,24 +20,11 @@ def evaluate(
     render_mode: str | None = "human",
     verbose: bool = True,
 ) -> dict:
-    """
-    Evaluate a trained DQN agent.
-    
-    Args:
-        checkpoint_path: Path to model checkpoint
-        episodes: Number of episodes to run
-        render_mode: Rendering mode ('human', 'rgb_array', or None)
-        verbose: Whether to print episode statistics
-    
-    Returns:
-        Dictionary with evaluation statistics
-    """
-    # Create environment
+    """Evaluate a trained DQN agent."""
     env = make_tetris_env(render_mode=render_mode)
     n_actions = env.action_space.n
     board_shape = infer_board_shape(env)
     
-    # Create agent
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     agent = DQNAgent(
         board_shape=board_shape,
@@ -48,7 +33,6 @@ def evaluate(
         config=DQNConfig(),
     )
     
-    # Load checkpoint
     agent.load(checkpoint_path)
     agent.q_network.eval()
     
@@ -59,7 +43,6 @@ def evaluate(
         print(f"Device: {device}")
         print(f"\nRunning {episodes} evaluation episodes...\n")
     
-    # Evaluation metrics
     episode_rewards = []
     episode_lengths = []
     episode_lines = []
@@ -73,17 +56,14 @@ def evaluate(
         ep_length = 0
         
         while not done:
-            # Select action (greedy, no exploration)
             action = agent.select_action(obs_proc, eval_mode=True)
             
-            # Execute action
             obs, reward, terminated, truncated, info = env.step(action)
             obs_proc = preprocess_observation(obs)
             ep_reward += reward
             ep_length += 1
             done = terminated or truncated
         
-        # Record episode statistics
         episode_rewards.append(ep_reward)
         episode_lengths.append(ep_length)
         episode_lines.append(info.get('lines_cleared', 0))
@@ -100,7 +80,6 @@ def evaluate(
     
     env.close()
     
-    # Compute statistics
     stats = {
         'mean_reward': float(np.mean(episode_rewards)),
         'std_reward': float(np.std(episode_rewards)),
@@ -130,25 +109,17 @@ def compare_with_random(
     checkpoint_path: str,
     episodes: int = 20,
 ) -> None:
-    """
-    Compare trained agent with random baseline.
-    
-    Args:
-        checkpoint_path: Path to model checkpoint
-        episodes: Number of episodes to run for each agent
-    """
+    """Compare trained agent with random baseline."""
     print("\n" + "=" * 60)
     print("COMPARISON: Trained Agent vs. Random Baseline")
     print("=" * 60)
     
-    # Evaluate trained agent
     print("\n1. TRAINED AGENT:")
     trained_stats = evaluate(checkpoint_path, episodes=episodes, render_mode=None, verbose=False)
     print(f"   Mean Reward: {trained_stats['mean_reward']:.2f} ± {trained_stats['std_reward']:.2f}")
     print(f"   Mean Lines: {trained_stats['mean_lines']:.1f}")
     print(f"   Mean Length: {trained_stats['mean_length']:.1f} steps")
     
-    # Evaluate random agent
     print("\n2. RANDOM BASELINE:")
     env = make_tetris_env(render_mode=None)
     random_rewards = []
@@ -178,7 +149,6 @@ def compare_with_random(
     print(f"   Mean Lines: {np.mean(random_lines):.1f}")
     print(f"   Mean Length: {np.mean(random_lengths):.1f} steps")
     
-    # Compute improvement
     reward_improvement = (
         (trained_stats['mean_reward'] - np.mean(random_rewards)) / abs(np.mean(random_rewards)) * 100
     )
