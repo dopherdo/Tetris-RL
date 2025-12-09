@@ -1,0 +1,10 @@
+gymnasium
+tetris-gymnasium
+numpy
+matplotlib
+torch
+torchvision
+scipy
+tqdm
+ipykernel
+
