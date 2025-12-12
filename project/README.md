@@ -21,3 +21,15 @@ One-line descriptions for every file in `project/`.
 - `src/utils/preprocessing.py`: Observation and board preprocessing helpers.
 - `src/utils/visualization.py`: Plotting helpers for metrics and learning curves.
 
+## How to run the project
+
+1) Install Python 3.9+.
+2) (Recommended) create a virtual environment:
+   - `python3 -m venv .venv` and `source .venv/bin/activate`
+3) Install dependencies from the repo root:
+   - `pip3 install -r requirements.txt`
+4) Run the demo notebook (from this `project/` folder):
+   - Open `project.ipynb` in Jupyter/Lab/VS Code and run all cells, or
+   - Export to HTML: `python3 -m nbconvert --to html --output project.html project.ipynb`
+5) If using the trained model, ensure `checkpoint_500k.pt` stays in this folder so the notebook can load it.
+
