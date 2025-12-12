@@ -1,1 +1,1 @@
-Readme in src folder
+Readme in project folder
